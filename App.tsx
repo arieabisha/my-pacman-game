@@ -5,6 +5,51 @@ import { PACMAN_SPEED, GHOST_SPEED, FRIGHTENED_SPEED, EATEN_SPEED, LEVELS, TILE_
 
 const GHOST_COLORS = ['#FF0000', '#FFB8FF', '#00FFFF', '#FFB852'];
 
+// Retro Sound Manager using Web Audio API
+class SoundManager {
+  private ctx: AudioContext | null = null;
+
+  private init() {
+    if (!this.ctx) {
+      this.ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+    }
+    if (this.ctx.state === 'suspended') {
+      this.ctx.resume();
+    }
+  }
+
+  private playTone(freq: number, type: OscillatorType, duration: number, volume: number, slideTo?: number) {
+    this.init();
+    if (!this.ctx) return;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, this.ctx.currentTime);
+    if (slideTo) {
+      osc.frequency.exponentialRampToValueAtTime(slideTo, this.ctx.currentTime + duration);
+    }
+    gain.gain.setValueAtTime(volume, this.ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + duration);
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start();
+    osc.stop(this.ctx.currentTime + duration);
+  }
+
+  playPellet() { this.playTone(600, 'square', 0.05, 0.05, 800); }
+  playPower() { this.playTone(200, 'sawtooth', 0.2, 0.1, 1200); }
+  playEatGhost() { this.playTone(800, 'square', 0.3, 0.1, 100); }
+  playCaught() { this.playTone(400, 'sawtooth', 0.8, 0.1, 50); }
+  playRespawn() { this.playTone(100, 'triangle', 0.5, 0.1, 1000); }
+  playFruit() {
+    this.playTone(880, 'square', 0.1, 0.1);
+    setTimeout(() => this.playTone(1100, 'square', 0.1, 0.1), 100);
+    setTimeout(() => this.playTone(1320, 'square', 0.2, 0.1), 200);
+  }
+}
+
+const sounds = new SoundManager();
+
 const App: React.FC = () => {
   const [gameState, setGameState] = useState<GameState>({
     score: 0,
@@ -32,6 +77,19 @@ const App: React.FC = () => {
   const initLevel = useCallback((levelIdx: number, keepScore: boolean = false) => {
     const rawMap = LEVELS[levelIdx % LEVELS.length];
     const map = rawMap.map(row => [...row]);
+    
+    // Spawn a random fruit (Tile 6) in place of a pellet
+    const pelletPositions: {x: number, y: number}[] = [];
+    map.forEach((row, y) => {
+      row.forEach((tile, x) => {
+        if (tile === 2) pelletPositions.push({ x, y });
+      });
+    });
+    if (pelletPositions.length > 0) {
+      const randomPellet = pelletPositions[Math.floor(Math.random() * pelletPositions.length)];
+      map[randomPellet.y][randomPellet.x] = 6;
+    }
+
     mapRef.current = map;
 
     let pacStart = { x: 1, y: 1 };
@@ -128,14 +186,17 @@ const App: React.FC = () => {
     const gridX = Math.floor(nextX / TILE_SIZE);
     const gridY = Math.floor(nextY / TILE_SIZE);
 
-    if (gridX < 0 || gridX >= (map[0]?.length || 0)) return true;
-    if (gridY < 0 || gridY >= map.length) return true;
+    const mapWidth = (map[0]?.length || 0);
+    const mapHeight = map.length;
+
+    // Portals
+    if (gridX < 0 || gridX >= mapWidth || gridY < 0 || gridY >= mapHeight) return true;
 
     return map[gridY][gridX] !== 1;
   };
 
   const moveEntity = (entity: { pos: Position, dir: Direction, nextDir: Direction }, speed: number, isGhost: boolean = false) => {
-    const mapWidth = mapRef.current[0].length * TILE_SIZE;
+    const mapWidth = (mapRef.current[0]?.length || 0) * TILE_SIZE;
     const mapHeight = mapRef.current.length * TILE_SIZE;
     
     const inHorizTunnel = entity.pos.x < 0 || entity.pos.x >= mapWidth - TILE_SIZE;
@@ -159,10 +220,10 @@ const App: React.FC = () => {
       entity.dir = Direction.NONE;
     }
 
-    if (entity.pos.x < -TILE_SIZE) entity.pos.x = mapWidth;
-    if (entity.pos.x > mapWidth) entity.pos.x = -TILE_SIZE;
-    if (entity.pos.y < -TILE_SIZE) entity.pos.y = mapHeight;
-    if (entity.pos.y > mapHeight) entity.pos.y = -TILE_SIZE;
+    if (entity.pos.x < -TILE_SIZE) entity.pos.x = mapWidth - speed;
+    if (entity.pos.x >= mapWidth) entity.pos.x = speed - TILE_SIZE;
+    if (entity.pos.y < -TILE_SIZE) entity.pos.y = mapHeight - speed;
+    if (entity.pos.y >= mapHeight) entity.pos.y = speed - TILE_SIZE;
   };
 
   const update = useCallback(() => {
@@ -179,11 +240,17 @@ const App: React.FC = () => {
 
     if (map[gridY] && map[gridY][gridX] === 2) {
       map[gridY][gridX] = 0;
+      sounds.playPellet();
       setGameState(prev => ({ ...prev, score: prev.score + 10 }));
     } else if (map[gridY] && map[gridY][gridX] === 3) {
       map[gridY][gridX] = 0;
+      sounds.playPower();
       setGameState(prev => ({ ...prev, score: prev.score + 50, powerModeTime: POWER_MODE_DURATION }));
       ghostsRef.current.forEach(g => { if (g.state !== GhostState.EATEN) g.state = GhostState.FRIGHTENED; });
+    } else if (map[gridY] && map[gridY][gridX] === 6) {
+      map[gridY][gridX] = 0;
+      sounds.playFruit();
+      setGameState(prev => ({ ...prev, score: prev.score + 100 }));
     }
 
     if (gameState.powerModeTime > 0) {
@@ -266,25 +333,32 @@ const App: React.FC = () => {
       if (dist < TILE_SIZE * 0.8) {
         if (ghost.state === GhostState.FRIGHTENED) {
           ghost.state = GhostState.EATEN;
+          sounds.playEatGhost();
           setGameState(prev => ({ ...prev, score: prev.score + 200 }));
           
-          // Fixed 7-second timer to return to original state after being eaten
           const ghostId = ghost.id;
           setTimeout(() => {
             const targetGhost = ghostsRef.current.find(g => g.id === ghostId);
             if (targetGhost && targetGhost.state === GhostState.EATEN) {
               targetGhost.state = GhostState.CHASE;
+              sounds.playRespawn();
             }
           }, 7000);
 
         } else if (ghost.state === GhostState.CHASE) {
+          sounds.playCaught();
           setGameState(prev => {
             const nextLives = prev.lives - 1;
             if (nextLives <= 0) return { ...prev, isGameOver: true, lives: 0 };
             return { ...prev, lives: nextLives, isPaused: true };
           });
-          const rawMap = LEVELS[gameState.level % LEVELS.length];
-          rawMap.forEach((row, y) => { row.forEach((tile, x) => { if (tile === 5) pac.pos = { x: x * TILE_SIZE, y: y * TILE_SIZE }; }); });
+          // Find Pac-Man spawn position in current level
+          const currentRawMap = LEVELS[gameState.level % LEVELS.length];
+          currentRawMap.forEach((row, y) => {
+            row.forEach((tile, x) => {
+              if (tile === 5) pacmanRef.current.pos = { x: x * TILE_SIZE, y: y * TILE_SIZE };
+            });
+          });
           ghostsRef.current.forEach((g) => { 
             g.pos = { ...g.homePos }; 
             g.dir = Direction.LEFT; 
@@ -319,6 +393,13 @@ const App: React.FC = () => {
         } else if (tile === 3) {
           ctx.fillStyle = '#ffb8ae';
           ctx.beginPath(); ctx.arc(x * TILE_SIZE + TILE_SIZE/2, y * TILE_SIZE + TILE_SIZE/2, 6, 0, Math.PI * 2); ctx.fill();
+        } else if (tile === 6) {
+          ctx.fillStyle = '#ff0000';
+          ctx.beginPath(); ctx.arc(x * TILE_SIZE + TILE_SIZE/2 - 4, y * TILE_SIZE + TILE_SIZE/2 + 4, 4, 0, Math.PI * 2); ctx.fill();
+          ctx.beginPath(); ctx.arc(x * TILE_SIZE + TILE_SIZE/2 + 4, y * TILE_SIZE + TILE_SIZE/2 + 2, 4, 0, Math.PI * 2); ctx.fill();
+          ctx.strokeStyle = '#00ff00';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath(); ctx.moveTo(x * TILE_SIZE + TILE_SIZE/2 - 4, y * TILE_SIZE + TILE_SIZE/2); ctx.quadraticCurveTo(x * TILE_SIZE + TILE_SIZE/2, y * TILE_SIZE + 4, x * TILE_SIZE + TILE_SIZE/2 + 6, y * TILE_SIZE + 4); ctx.stroke();
         }
       });
     });
@@ -393,7 +474,7 @@ const App: React.FC = () => {
           <div className="absolute inset-0 flex items-center justify-center bg-black/70 backdrop-blur-sm">
             <div className="text-center p-8 bg-blue-900/40 border-2 border-blue-500 rounded-xl shadow-2xl">
               <h2 className="text-2xl mb-6 font-bold animate-pulse">{gameState.isGameOver ? 'GAME OVER' : gameState.isLevelComplete ? 'LEVEL COMPLETE' : 'READY?'}</h2>
-              <p className="text-sm mb-8 text-blue-200 leading-relaxed whitespace-pre-line">{gameState.isGameOver ? 'Final Score: ' + gameState.score : gameState.isLevelComplete ? 'Ready for Level ' + (gameState.level + 2) + '?' : 'Use ARROW KEYS or WASD\n4-Way Tunnels are Active!'}</p>
+              <p className="text-sm mb-8 text-blue-200 leading-relaxed whitespace-pre-line">{gameState.isGameOver ? 'Final Score: ' + gameState.score : gameState.isLevelComplete ? 'Ready for Level ' + (gameState.level + 2) + '?' : 'Use ARROW KEYS or WASD\nOpen Symmetrical Maze!'}</p>
               <button onClick={() => { if (gameState.isGameOver || gameState.isLevelComplete) initLevel(gameState.isLevelComplete ? gameState.level + 1 : 0, gameState.isLevelComplete); else setGameState(prev => ({ ...prev, isPaused: false })); }} className="px-6 py-3 bg-yellow-500 text-black font-bold rounded-lg hover:bg-yellow-400 active:scale-95 transition-all shadow-lg shadow-yellow-500/20">{gameState.isGameOver ? 'RESTART' : gameState.isLevelComplete ? 'NEXT LEVEL' : 'START'}</button>
               <div className="mt-6 text-[10px] text-gray-400 uppercase tracking-widest">Or Press ENTER</div>
             </div>
@@ -406,7 +487,7 @@ const App: React.FC = () => {
          <div className="flex items-center gap-3"><div className="w-4 h-4 bg-cyan-400 rounded-sm"></div><span>Inky: Flanker</span></div>
          <div className="flex items-center gap-3"><div className="w-4 h-4 bg-orange-400 rounded-sm"></div><span>Clyde: Random</span></div>
       </div>
-      <div className="mt-auto pt-8 pb-4 text-[10px] text-gray-600 font-sans uppercase">Ghosts never stop. 7s respawn timer. Use 4-way doors.</div>
+      <div className="mt-auto pt-8 pb-4 text-[10px] text-gray-600 font-sans uppercase">Improved Maze Accessibility & Flow.</div>
     </div>
   );
 };

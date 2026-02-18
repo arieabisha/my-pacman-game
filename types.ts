@@ -44,5 +44,5 @@ export interface GameState {
   powerModeTime: number;
 }
 
-export type MapTile = 0 | 1 | 2 | 3 | 4 | 5; 
-// 0: Empty, 1: Wall, 2: Pellet, 3: Power Pellet, 4: Ghost Spawn, 5: Pacman Spawn
+export type MapTile = 0 | 1 | 2 | 3 | 4 | 5 | 6; 
+// 0: Empty, 1: Wall, 2: Pellet, 3: Power Pellet, 4: Ghost Spawn, 5: Pacman Spawn, 6: Fruit
